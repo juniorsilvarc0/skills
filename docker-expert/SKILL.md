@@ -494,6 +494,36 @@ docker logs <container> --tail 50
 docker inspect <container> --format='{{.State.ExitCode}} {{.State.Error}}'
 ```
 
+### Dead / orphaned named volume (0B, never populated)
+**Symptoms:** `docker volume ls` shows a named volume; `docker system df -v` shows it as 0B.
+
+**Common cause:** Volume declared in compose pointing to a path that the Dockerfile
+never writes to. Classic example: mounting `venv_volume:/app/.venv` when the Dockerfile
+installs with `pip install` to system Python (not to `/app/.venv`).
+
+**How to diagnose:**
+```bash
+# See volume sizes — 0B = never written to
+docker system df -v | grep -A 20 "Local Volumes"
+
+# See which container is using which volume and at which path
+docker ps -q | xargs -n1 docker inspect \
+  --format '{{.Name}} {{range .Mounts}}{{.Name}}:{{.Destination}} {{end}}'
+```
+
+**Fix:**
+1. Remove the volume from the compose file (both the mount and the `volumes:` declaration)
+2. Recreate the container: `docker compose up -d --no-deps <service>`
+3. Remove the now-orphaned volume:
+```bash
+docker volume rm <volume_name>
+# or remove all orphans at once:
+docker volume prune -f   # ONLY removes volumes with 0 active containers
+```
+
+**Note:** Removing a volume from `docker-compose.yml` does NOT automatically delete
+the Docker volume. The named volume persists until explicitly removed.
+
 ---
 
 ## Size Reference
@@ -511,6 +541,46 @@ hot-reload. The prod image is 5-10x smaller via multi-stage + standalone.
 ---
 
 ## Resources
+
+## Code Review Checklist
+
+### `.dockerignore`
+- [ ] Exists for every service with a `build:` context
+- [ ] Excludes: `node_modules/`, `venv/`/`.venv/`, `.git/`, build outputs, logs
+- [ ] Excludes secrets: `.env`, `.env.*`
+- [ ] Does NOT exclude: migrations, production scripts, health check scripts
+
+### Dockerfile
+- [ ] Dependency files (`requirements.txt`, `package.json`) copied BEFORE source code
+- [ ] `apt-get install` uses `--no-install-recommends` (saves 50-200MB)
+- [ ] `apt-get` cache cleaned in same `RUN` layer (`&& rm -rf /var/lib/apt/lists/*`)
+- [ ] Production image uses multi-stage (build tools not in final image)
+- [ ] Production image: only runtime libs installed (`libpq5`, not `libpq-dev`)
+- [ ] `PYTHONDONTWRITEBYTECODE=1` and `PYTHONUNBUFFERED=1` set for Python
+- [ ] `libc6-compat` installed for Node.js on Alpine
+- [ ] Non-root user in production (`adduser` + `USER`)
+- [ ] No secrets in `ENV` or `ARG`
+
+### Docker Compose
+- [ ] No `version:` key (obsolete since Compose V2)
+- [ ] All declared volumes are actually used (check with `docker system df -v` for 0B)
+- [ ] `depends_on` uses `condition: service_healthy` (not just service name)
+- [ ] Healthchecks defined on stateful services (postgres, redis, backend)
+- [ ] Resource limits (`cpus`, `memory`) on all prod services
+- [ ] No bind mounts in prod (`./src:/app` only in dev)
+- [ ] Persistent data in named volumes (postgres_data, redis_data)
+
+### After removing a volume from compose
+Removing a volume from `docker-compose.yml` does NOT delete the Docker volume.
+After recreating the container, explicitly remove orphaned volumes:
+```bash
+docker volume ls                    # check for orphans
+docker volume prune -f              # removes volumes with 0 active containers
+# or specifically:
+docker volume rm <volume_name>
+```
+
+---
 
 See `resources/implementation-playbook.md` for:
 - Complete project setup (Python + Next.js + Postgres + Redis)
